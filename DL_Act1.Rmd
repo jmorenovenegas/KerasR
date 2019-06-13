@@ -1,0 +1,166 @@
+---
+title: "DL_Act1"
+author: "Javier Moreno Venegas"
+date: "24/10/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#Introducción
+
+El objetivo de esta actividad es aplicar deep learning utilizando la librería 'keras' de R para diseñar modelos predictivos y comparar los resultados con otros modelos de NN, SVM y DT. 
+
+```{r, echo=TRUE}
+library(foreign)
+library(janitor)
+library(FSelector)
+library(keras)
+library(caret)
+library(pROC)
+```
+
+#Datos
+
+Utilizaremos un conjunto de datos de 181 muestras de tejido pulmonar. Cada muestra está descrita por 12533 variables que corresponden a un gen concreto y cuyo valor hace referencia a la expresión de ese gen. 31 muestras presentan mesotelioma pleural maligno(MPM) y 150 presentan adenocarcinoma(ADCA).  
+
+##Preparación de los datos
+
+```{r, echo=TRUE}
+training <- read.arff('lungCancer_train.arff')
+test <- read.arff('lungCancer_test.arff')
+
+#Unimos los dos conjuntos en uno puesto que usaremos cross-validation para la validación interna
+datos <- rbind(training, test)
+
+#Limpiamos los nombres de las variables. Los nombres que presentan inicialmente las variables dan problemas a la hora de diseñar las fórmulas utilizadas en la estimación de los modelos. La función clean_names() hará las modificaciones necesarias para evitarnos problemas.
+datos <- clean_names(datos)
+```
+
+##Filtrado de las variables
+
+```{r, echo=TRUE}
+attr.scores <- chi.squared(class ~ ., datos)
+filtrado.primario <- cutoff.biggest.diff(attr.scores)
+print(paste("Nº de variables después del primer filtro: ", length(filtrado.primario)))
+```
+
+```{r, echo=TRUE}
+attr.scores2 <- oneR(class ~ ., cbind(datos[,filtrado.primario], class=datos$class))
+filtrado.secundario <- cutoff.biggest.diff(attr.scores2)
+print(paste("Nº de variables después del segundo filtro: ", length(filtrado.secundario)))
+```
+
+#Implementación del modelo de DL
+
+```{r, echo=TRUE}
+set.seed(123)
+#Creamos la variable folds para poder realizar 10-fold cross-validation
+folds <- createFolds(1:nrow(datos), k=10, list=TRUE, returnTrain = FALSE)
+```
+
+```{r, echo=TRUE}
+#Calcula un modelo realizando cross-validation y devuelve una lista con el numero de neuronas en la capa oculta, el dropout y el AUC obtenido.
+
+Compute_model <- function(LU, DO, datos, folds){
+  sum_auc <- 0
+  
+  for(i in 1:length(folds)){
+    training <- datos[unlist(folds[-i]), ]
+    testing <- datos[unlist(folds[i]), ]
+    
+    x_train <- training[, filtrado.secundario]
+    x_test <- testing[, filtrado.secundario]
+    
+    #Normalizar
+    x_train <- normalize(as.matrix(x_train))
+    x_test <- normalize(as.matrix(x_test))
+    
+    #One hot encoding
+    #0 -> ADCA, 1 -> MPM
+    y_train <- to_categorical(as.numeric(training$class) - 1)
+    y_test <- to_categorical(as.numeric(testing$class) - 1)
+    
+    
+    model <- keras_model_sequential()
+    
+    model %>% 
+      layer_dense(units = LU, activation = 'relu',
+      input_shape = c(length(filtrado.secundario))) %>%
+      layer_dropout(rate = DO) %>%
+      layer_dense(units = LU, activation = 'relu') %>%
+      layer_dropout(rate = DO) %>%
+      layer_dense(units = 2, activation = 'softmax')
+    
+    model %>% compile(
+      loss = 'categorical_crossentropy',
+      optimizer = optimizer_rmsprop(),
+      metrics = c('accuracy')
+    )
+    
+    model %>% fit(
+      as.matrix(x_train), y_train,
+      epochs = 10,
+      batch_size = 32,
+      validation_split = 0.2
+    )
+    
+    modelpreds <- model %>%
+      predict_classes(as.matrix(x_test))
+  
+    sum_auc <- sum_auc + auc(as.numeric(testing$class) - 1, modelpreds)
+  }
+  auc <- sum_auc/length(folds)
+  res <- list(Neuronas_en_capa_oculta = LU, Dropout = DO, AUC = auc)
+  return(res)
+}
+```
+
+```{r prueba, echo=TRUE, message=FALSE}
+#R <- Compute_model(256, 0.4, datos, folds)
+#R <- data.frame(R)
+#R <- rbind(R, Compute_model(256, 0.2, datos, folds))
+#R <- rbind(R, Compute_model(128, 0.4, datos, folds))
+#R <- rbind(R, Compute_model(128, 0.2, datos, folds))
+#R <- rbind(R, Compute_model(64, 0.4, datos, folds))
+#R <- rbind(R, Compute_model(64, 0.2, datos, folds))
+#R <- rbind(R, Compute_model(32, 0.4, datos, folds))
+#R <- rbind(R, Compute_model(32, 0.2, datos, folds))
+print(R)
+```
+
+#Implementación de los modelos DT, SVM, NN con caret
+
+```{r, echo=TRUE}
+#Creamos una variable para la validación interna.
+set.seed(1234)
+ctrl <- trainControl(method = 'cv', number = 10, classProbs = TRUE, summaryFunction = twoClassSummary)
+```
+
+```{r, echo=TRUE}
+datos.filtrados <- cbind(datos[,filtrado.secundario],class = datos$class)
+
+set.seed(825)
+#nnet.model <- train(class ~ ., data = datos.filtrados, method = 'nnet', trControl = ctrl, metric = 'ROC')
+
+set.seed(825)
+#svm.model <- train(class ~ ., data = datos.filtrados, method = 'svmRadial', trControl = ctrl, metric = 'ROC')
+
+set.seed(825)
+#DT.model <- train(class ~ ., data = datos.filtrados, method = 'rpart', trControl = ctrl, metric = 'ROC')
+```
+
+Visualizamos los modelos obtenidos.
+```{r, echo=TRUE}
+print(nnet.model)
+print(svm.model)
+print(DT.model)  
+```
+
+EL mejor resultado obtenido mediante DL (AUC = 0.9589744) presenta 128 neuronas en la capa oculta y un dropout de 0.2. Supera al mejor resultado obtenido con DT pero no a los modelos obtenidos mediante SVM y NN.  
+Hay que mencionar que únicamente hemos probado algunos modelos de DL dado que buscar el modelo óptimo aplicando validación interna y con la variabilidad en los parámetros como el número de capas y la cantidad de neuronas en capa oculta puede resultar muy costoso en tiempo de computo.  
+Por otra parte los modelos obtenidos con SVM y NN son difícilmente superables puesto que obtienen AUC de 1(SVM) o de casi 1(NN).  
+En conclusión, pese a la potencia del DL, otros algoritmos se ajustan mejor a la condiciones de este problema en concreto, lo que demuestra que no hay una bala de plata en cuanto a modelos de predicción.
+
+
